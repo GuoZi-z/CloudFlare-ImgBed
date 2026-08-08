@@ -14,7 +14,7 @@ import { getDatabase } from '../utils/databaseAdapter.js';
 
 
 export async function onRequest(context) {
-	return new Response('✅ upload/index.js 已执行！', { status: 200 });
+	
     const { request, env, params, waitUntil, next, data } = context;
 
     const url = new URL(request.url);
