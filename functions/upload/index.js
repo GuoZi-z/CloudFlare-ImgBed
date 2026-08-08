@@ -41,6 +41,9 @@ export async function onRequest(context) {
         isSignatureEnabled = false;
     }
 
+console.log('🔍 isSignatureEnabled:', isSignatureEnabled);
+console.log('🔍 request.method:', request.method);
+
     // ===== 根据开关决定是否验证签名（仅 POST 请求） =====
     if (request.method === 'POST' && isSignatureEnabled) {
         const signatureCheck = await verifyUploadSignature(request, env);
