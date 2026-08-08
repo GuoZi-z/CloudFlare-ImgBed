@@ -13,14 +13,12 @@ import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { getDatabase } from '../utils/databaseAdapter.js';
 
 
-export async function onRequest(context) {  // Contents of context object
+export async function onRequest(context) {
     const { request, env, params, waitUntil, next, data } = context;
 
-    // 解析请求的URL，存入 context
     const url = new URL(request.url);
     context.url = url;
 
-    // 读取各项配置，存入 context
     const securityConfig = await fetchSecurityConfig(env);
     const uploadConfig = await fetchUploadConfig(env, context);
 
@@ -33,9 +31,34 @@ export async function onRequest(context) {  // Contents of context object
         return UnauthorizedResponse('Unauthorized');
     }
 
+    // ===== 读取 KV 开关 =====
+    let isSignatureEnabled = false;
+    try {
+        const value = await env.CONFIG_KV.get('SIGNATURE_ENABLED', 'text');
+        isSignatureEnabled = (value === 'true');
+    } catch (e) {
+        console.error('Failed to read SIGNATURE_ENABLED from KV:', e);
+        isSignatureEnabled = false;
+    }
+
+    // ===== 根据开关决定是否验证签名（仅 POST 请求） =====
+    if (request.method === 'POST' && isSignatureEnabled) {
+        const signatureCheck = await verifyUploadSignature(request, env);
+        if (!signatureCheck.valid) {
+            return new Response(JSON.stringify({
+                error: signatureCheck.message || '签名验证失败，禁止上传',
+                code: 'SIGNATURE_INVALID'
+            }), {
+                status: 401,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+        context.uploadUserId = signatureCheck.userId;
+    }
+
+    // ===== 以下为原有代码（保持不变） =====
     // 获得上传IP
     const uploadIp = getUploadIp(request);
-    // 判断上传ip是否被封禁
     const isBlockedIp = await isBlockedUploadIp(env, uploadIp);
     if (isBlockedIp) {
         return createResponse('Error: Your IP is blocked', { status: 403 });
@@ -70,7 +93,6 @@ export async function onRequest(context) {  // Contents of context object
     // 处理非分块文件上传
     return await processFileUpload(context);
 }
-
 
 // 通用文件上传处理函数
 async function processFileUpload(context, formdata = null) {
@@ -864,4 +886,52 @@ async function tryRetry(err, context, uploadChannel, fullId, metadata, fileExt, 
     }
 
     return createResponse(JSON.stringify(errMessages), { status: 500 });
+}
+
+// ===== 新增：签名验证函数（放在文件末尾） =====
+async function verifyUploadSignature(request, env) {
+    try {
+        const formData = await request.formData();
+        const expires = parseInt(formData.get('expires') || '0');
+        const signature = formData.get('signature') || '';
+        const userId = formData.get('userId') || '';
+        const uploadFolder = formData.get('uploadFolder') || '';
+
+        if (!signature && !expires && !userId) {
+            return { valid: false, message: '缺少上传凭证，请先获取签名' };
+        }
+
+        const now = Math.floor(Date.now() / 1000);
+        if (expires < now) {
+            return { valid: false, message: '上传凭证已过期（有效期为5分钟），请重新获取' };
+        }
+
+        const secret = env.UPLOAD_SECRET;
+        if (!secret) {
+            console.error('UPLOAD_SECRET not set');
+            return { valid: false, message: '服务器配置错误' };
+        }
+
+        const encoder = new TextEncoder();
+        const data = encoder.encode(uploadFolder + expires + userId);
+        const key = await crypto.subtle.importKey(
+            'raw',
+            encoder.encode(secret),
+            { name: 'HMAC', hash: 'SHA-256' },
+            false,
+            ['sign']
+        );
+        const sigBuffer = await crypto.subtle.sign('HMAC', key, data);
+        const sigArray = Array.from(new Uint8Array(sigBuffer));
+        const expectedSignature = sigArray.map(b => b.toString(16).padStart(2, '0')).join('');
+
+        if (signature !== expectedSignature) {
+            return { valid: false, message: '签名无效，请重新获取' };
+        }
+
+        return { valid: true, userId: parseInt(userId) };
+    } catch (error) {
+        console.error('Signature verification error:', error);
+        return { valid: false, message: '签名验证过程发生错误' };
+    }
 }
