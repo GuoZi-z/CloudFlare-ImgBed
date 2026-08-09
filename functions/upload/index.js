@@ -47,18 +47,20 @@ console.log('🔍 request.method:', request.method);
 
     // ===== 根据开关决定是否验证签名（仅 POST 请求） =====
     if (request.method === 'POST' && isSignatureEnabled) {
-        const signatureCheck = await verifyUploadSignature(request, env);
-        if (!signatureCheck.valid) {
-            return new Response(JSON.stringify({
-                error: signatureCheck.message || '签名验证失败，禁止上传',
-                code: 'SIGNATURE_INVALID'
-            }), {
-                status: 401,
-                headers: { 'Content-Type': 'application/json' }
-            });
-        }
-        context.uploadUserId = signatureCheck.userId;
+    const signatureCheck = await verifyUploadSignature(request, env);
+    if (!signatureCheck.valid) {
+        return new Response(JSON.stringify({
+            error: signatureCheck.message || '签名验证失败',
+            code: 'SIGNATURE_INVALID'
+        }), { status: 401, headers: { 'Content-Type': 'application/json' } });
     }
+    context.uploadUserId = signatureCheck.userId;
+    // ⬇️ 测试：验证通过后直接返回成功，跳过上传逻辑
+    return new Response(JSON.stringify({ success: true, message: '签名有效，上传逻辑未执行' }), { 
+        status: 200, 
+        headers: { 'Content-Type': 'application/json' } 
+    });
+}
 
     // ===== 以下为原有代码（保持不变） =====
     // 获得上传IP
