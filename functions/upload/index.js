@@ -892,7 +892,8 @@ async function tryRetry(err, context, uploadChannel, fullId, metadata, fileExt, 
 // ===== 新增：签名验证函数（放在文件末尾） =====
 async function verifyUploadSignature(request, env) {
     try {
-        const formData = await request.formData();
+        const clonedRequest = request.clone();  // ⬅️ 克隆请求，保留原始请求体
+        const formData = await clonedRequest.formData();
         const expires = parseInt(formData.get('expires') || '0');
         const signature = formData.get('signature') || '';
         const userId = formData.get('userId') || '';
