@@ -55,11 +55,6 @@ console.log('🔍 request.method:', request.method);
         }), { status: 401, headers: { 'Content-Type': 'application/json' } });
     }
     context.uploadUserId = signatureCheck.userId;
-    // ⬇️ 测试：验证通过后直接返回成功，跳过上传逻辑
-    return new Response(JSON.stringify({ success: true, message: '签名有效，上传逻辑未执行' }), { 
-        status: 200, 
-        headers: { 'Content-Type': 'application/json' } 
-    });
 }
 
     // ===== 以下为原有代码（保持不变） =====
