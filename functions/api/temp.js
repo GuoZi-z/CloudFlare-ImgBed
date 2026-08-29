@@ -1,3 +1,5 @@
+import { getDatabase } from "../utils/databaseAdapter.js";
+
 export async function onRequest(context) {
   const { request, env } = context;
   const url = new URL(request.url);
@@ -14,14 +16,14 @@ export async function onRequest(context) {
 
   // 签名验证
   if (!signature || !expires) {
-    return new Response(JSON.stringify({ error: "missing signature params" }), { status: 401, headers: { "Content-Type": "application/json" } });
+    return new Response(JSON.stringify({ error: "参数不完整" }), { status: 401, headers: { "Content-Type": "application/json" } });
   }
   const now = Math.floor(Date.now() / 1000);
   if (expires < now) {
-    return new Response(JSON.stringify({ error: "signature expired" }), { status: 401, headers: { "Content-Type": "application/json" } });
+    return new Response(JSON.stringify({ error: "签名已过期" }), { status: 401, headers: { "Content-Type": "application/json" } });
   }
   if (!env.UPLOAD_SECRET) {
-    return new Response(JSON.stringify({ error: "server misconfigured" }), { status: 500, headers: { "Content-Type": "application/json" } });
+    return new Response(JSON.stringify({ error: "服务未配置" }), { status: 500, headers: { "Content-Type": "application/json" } });
   }
 
   const encoder = new TextEncoder();
@@ -31,16 +33,22 @@ export async function onRequest(context) {
   const sigBuffer = await crypto.subtle.sign("HMAC", key, data);
   const expectedSig = [...new Uint8Array(sigBuffer)].map(b => b.toString(16).padStart(2, "0")).join("");
   if (signature !== expectedSig) {
-    return new Response(JSON.stringify({ error: "invalid signature" }), { status: 401, headers: { "Content-Type": "application/json" } });
+    return new Response(JSON.stringify({ error: "签名无效" }), { status: 401, headers: { "Content-Type": "application/json" } });
   }
 
-  // 生成临时链接
+  // 生成临时链接（不暴露 path）
   const exp = Math.floor(Date.now() / 1000) + ttl;
   const nonce = generateNonce();
-  const linkData = `${path}:${exp}:${nonce}`;
+
+  // 把 path 存到 KV，用 nonce 当 key
+  const db = getDatabase(env);
+  await db.put(`temp_path:${nonce}`, path, { expirationTtl: ttl });
+
+  // 签名：nonce:exp
+  const linkData = `${nonce}:${exp}`;
   const sig = await sign(linkData, env.TEMP_LINK_SECRET);
 
-  const tempLink = `${url.origin}/api/temp-dl?path=${encodeURIComponent(path)}&exp=${exp}&nonce=${nonce}&sig=${sig}`;
+  const tempLink = `${url.origin}/api/temp-dl?nonce=${nonce}&exp=${exp}&sig=${sig}`;
 
   return new Response(JSON.stringify({ url: tempLink, expires: exp }), {
     headers: { "Content-Type": "application/json" }
