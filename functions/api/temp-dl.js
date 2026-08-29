@@ -13,8 +13,7 @@ export async function onRequest(context) {
   }
 
   const now = Math.floor(Date.now() / 1000);
-  if (now > exp) return new Response("链接已过期", { status: 403 });
-
+ 
   const expectedSig = await sign(`${nonce}:${exp}`, env.TEMP_LINK_SECRET);
   if (sig !== expectedSig) return new Response("签名无效", { status: 403 });
 
@@ -95,8 +94,6 @@ export async function onRequest(context) {
   }
 
   if (!dlResp || !dlResp.ok) return new Response("下载失败", { status: 502 });
-
-  await db.put(usedKey, "1", { expirationTtl: Math.max(exp - now, 1) });
 
   return new Response(dlResp.body, {
     status: dlResp.status,
