@@ -10,8 +10,7 @@ export async function onRequest(context) {
   let path, exp;
   try {
     const bin = atob(token);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
     const iv = bytes.slice(0, 16);
     const encrypted = bytes.slice(16);
 
@@ -24,10 +23,9 @@ export async function onRequest(context) {
     );
     const plainBuf = await crypto.subtle.decrypt({ name: "AES-CBC", iv }, key, encrypted);
     const decoded = new TextDecoder().decode(plainBuf);
-
     const parts = decoded.split("|");
     path = parts[0];
-    exp = parseInt(parts[1]);
+    exp = parseInt(parts[1], 10);
   } catch (e) {
     return new Response("链接无效", { status: 403 });
   }
