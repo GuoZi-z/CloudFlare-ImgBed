@@ -4,7 +4,12 @@ export async function onRequest(context) {
   const { request, env } = context;
   const url = new URL(request.url);
 
-  const token = url.searchParams.get("token") || "";
+  // ========== 修复 Base64 URL 传输问题 ==========
+  // URL 查询参数中，'+' 会被解析为空格，需还原
+  let token = url.searchParams.get("token") || "";
+  token = token.replace(/ /g, '+');   // 将空格还原为 '+'
+  // ============================================
+
   if (!token) return new Response("参数不完整", { status: 400 });
 
   let path, exp;
