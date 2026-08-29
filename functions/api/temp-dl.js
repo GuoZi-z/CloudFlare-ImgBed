@@ -7,12 +7,13 @@ export async function onRequest(context) {
   const token = url.searchParams.get("token") || "";
   if (!token) return new Response("参数不完整", { status: 400 });
 
-  // 解密 token，拿到 path + exp
   let path, exp;
   try {
-    const dec = atob(token);
-    const iv = dec.slice(0, 16);
-    const encrypted = dec.slice(16);
+    const bin = atob(token);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const iv = bytes.slice(0, 16);
+    const encrypted = bytes.slice(16);
 
     const key = await crypto.subtle.importKey(
       "raw",
@@ -21,8 +22,8 @@ export async function onRequest(context) {
       false,
       ["decrypt"]
     );
-    const plain = await crypto.subtle.decrypt("AES-CBC", key, encrypted, { iv });
-    const decoded = new TextDecoder().decode(plain);
+    const plainBuf = await crypto.subtle.decrypt({ name: "AES-CBC", iv }, key, encrypted);
+    const decoded = new TextDecoder().decode(plainBuf);
 
     const parts = decoded.split("|");
     path = parts[0];
@@ -31,9 +32,9 @@ export async function onRequest(context) {
     return new Response("链接无效", { status: 403 });
   }
 
-  // 检查过期
-  const now = Math.floor(Date.now() / 1000);
-  if (now > exp) return new Response("链接已过期", { status: 403 });
+  if (Math.floor(Date.now() / 1000) > exp) {
+    return new Response("链接已过期", { status: 403 });
+  }
 
   const db = getDatabase(env);
 
@@ -128,11 +129,4 @@ function parseRange(r) {
   if (s !== undefined && e !== undefined) return { offset: s, length: e - s + 1 };
   if (s !== undefined) return { offset: s };
   return undefined;
-}
-
-async function sign(data, secret) {
-  const enc = new TextEncoder();
-  const key = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const buf = await crypto.subtle.sign("HMAC", key, enc.encode(data));
-  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
 }
