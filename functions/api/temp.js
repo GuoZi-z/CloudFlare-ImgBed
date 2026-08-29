@@ -1,4 +1,4 @@
-import { userAuthCheck, UnauthorizedResponse } from "../../utils/userAuth";
+import { userAuthCheck, UnauthorizedResponse } from "../utils/userAuth";
 
 export async function onRequest(context) {
   const { request, env } = context;
