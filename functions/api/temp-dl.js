@@ -4,12 +4,11 @@ export async function onRequest(context) {
   const { request, env } = context;
   const url = new URL(request.url);
 
-  const path = url.searchParams.get("path");
-  const exp = parseInt(url.searchParams.get("exp") || "0", 10);
   const nonce = url.searchParams.get("nonce") || "";
+  const exp = parseInt(url.searchParams.get("exp") || "0", 10);
   const sig = url.searchParams.get("sig");
 
-  if (!path || !exp || !nonce || !sig) {
+  if (!nonce || !exp || !sig) {
     return new Response("missing params", { status: 400 });
   }
 
@@ -19,22 +18,28 @@ export async function onRequest(context) {
     return new Response("link expired", { status: 403 });
   }
 
-  // 2. 签名校验
-  const data = `${path}:${exp}:${nonce}`;
+  // 2. 签名校验（nonce:exp）
+  const data = `${nonce}:${exp}`;
   const expectedSig = await sign(data, env.TEMP_LINK_SECRET);
   if (sig !== expectedSig) {
     return new Response("invalid signature", { status: 403 });
   }
 
-  // 3. nonce 一次性校验
+  // 3. 从 KV 取 path
   const db = getDatabase(env);
+  const path = await db.get(`temp_path:${nonce}`);
+  if (!path) {
+    return new Response("link expired", { status: 403 });
+  }
+
+  // 4. nonce 一次性校验
   const usedKey = `temp_nonce:${nonce}`;
   const alreadyUsed = await db.get(usedKey);
   if (alreadyUsed) {
     return new Response("link already used", { status: 403 });
   }
 
-  // 4. 读文件 metadata
+  // 5. 读文件 metadata
   const row = await db.getWithMetadata(path);
   if (!row || row.value === null) {
     return new Response(JSON.stringify({ error: "file not found", queriedPath: path }), { status: 404, headers: { "Content-Type": "application/json" } });
@@ -45,7 +50,7 @@ export async function onRequest(context) {
     return new Response("only telegram files supported", { status: 400 });
   }
 
-  // 5. getFile
+  // 6. getFile
   const proxy = meta.TgProxyUrl || "api.telegram.org";
   const gfResp = await fetch(`https://${proxy}/bot${meta.TgBotToken}/getFile?file_id=${meta.TgFileId}`);
   if (!gfResp.ok) return new Response("getFile failed", { status: 502 });
@@ -53,23 +58,22 @@ export async function onRequest(context) {
   if (!gfJson.ok) return new Response("getFile error", { status: 502 });
   const tgFilePath = gfJson.result.file_path;
 
-  // 6. 拉文件
+  // 7. 拉文件
   const dlResp = await fetch(`https://${proxy}/file/bot${meta.TgBotToken}/${tgFilePath}`, {
     headers: { "Range": request.headers.get("Range") || "" }
   });
   if (!dlResp.ok) return new Response("download failed", { status: 502 });
 
-  // 7. 标记 nonce 已用
-  const ttl = exp - now;
-  await db.put(usedKey, "1", { expirationTtl: ttl });
+  // 8. 标记 nonce 已用
+  await db.put(usedKey, "1", { expirationTtl: exp - now });
 
-  // 8. 返回
+  // 9. 返回
   return new Response(dlResp.body, {
     status: dlResp.status,
     headers: {
       "Content-Type": dlResp.headers.get("Content-Type") || "application/octet-stream",
       "Cache-Control": "no-store",
-      "Content-Disposition": `inline; filename="${path.split("/").pop()}"`
+      "Content-Disposition": `attachment; filename="${path.split("/").pop()}"`
     }
   });
 }
