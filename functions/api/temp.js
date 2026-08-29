@@ -40,7 +40,7 @@ export async function onRequest(context) {
   const linkData = `${path}:${exp}:${nonce}`;
   const sig = await sign(linkData, env.TEMP_LINK_SECRET);
 
-  const tempLink = `${url.origin}/api/temp/dl?path=${encodeURIComponent(path)}&exp=${exp}&nonce=${nonce}&sig=${sig}`;
+  const tempLink = `${url.origin}/api/temp-dl?path=${encodeURIComponent(path)}&exp=${exp}&nonce=${nonce}&sig=${sig}`;
 
   return new Response(JSON.stringify({ url: tempLink, expires: exp }), {
     headers: { "Content-Type": "application/json" }
