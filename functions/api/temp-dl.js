@@ -1,0 +1,83 @@
+import { getDatabase } from "../../utils/databaseAdapter.js";
+
+export async function onRequest(context) {
+  const { request, env } = context;
+  const url = new URL(request.url);
+
+  const path = url.searchParams.get("path");
+  const exp = parseInt(url.searchParams.get("exp") || "0", 10);
+  const nonce = url.searchParams.get("nonce") || "";
+  const sig = url.searchParams.get("sig");
+
+  if (!path || !exp || !nonce || !sig) {
+    return new Response("missing params", { status: 400 });
+  }
+
+  // 1. 过期检查
+  const now = Math.floor(Date.now() / 1000);
+  if (now > exp) {
+    return new Response("link expired", { status: 403 });
+  }
+
+  // 2. 签名校验
+  const data = `${path}:${exp}:${nonce}`;
+  const expectedSig = await sign(data, env.TEMP_LINK_SECRET);
+  if (sig !== expectedSig) {
+    return new Response("invalid signature", { status: 403 });
+  }
+
+  // 3. nonce 一次性校验
+  const db = getDatabase(env);
+  const usedKey = `temp_nonce:${nonce}`;
+  const alreadyUsed = await db.get(usedKey);
+  if (alreadyUsed) {
+    return new Response("link already used", { status: 403 });
+  }
+
+  // 4. 读文件 metadata
+  const row = await db.getWithMetadata(path);
+  if (!row || row.value === null) {
+    return new Response(JSON.stringify({ error: "file not found", queriedPath: path }), { status: 404, headers: { "Content-Type": "application/json" } });
+  }
+  const meta = row.metadata;
+
+  if (meta.Channel !== "TelegramNew") {
+    return new Response("only telegram files supported", { status: 400 });
+  }
+
+  // 5. getFile
+  const proxy = meta.TgProxyUrl || "api.telegram.org";
+  const gfResp = await fetch(`https://${proxy}/bot${meta.TgBotToken}/getFile?file_id=${meta.TgFileId}`);
+  if (!gfResp.ok) return new Response("getFile failed", { status: 502 });
+  const gfJson = await gfResp.json();
+  if (!gfJson.ok) return new Response("getFile error", { status: 502 });
+  const tgFilePath = gfJson.result.file_path;
+
+  // 6. 拉文件
+  const dlResp = await fetch(`https://${proxy}/file/bot${meta.TgBotToken}/${tgFilePath}`, {
+    headers: { "Range": request.headers.get("Range") || "" }
+  });
+  if (!dlResp.ok) return new Response("download failed", { status: 502 });
+
+  // 7. 标记 nonce 已用
+  const ttl = exp - now;
+  await db.put(usedKey, "1", { expirationTtl: ttl });
+
+  // 8. 返回
+  return new Response(dlResp.body, {
+    status: dlResp.status,
+    headers: {
+      "Content-Type": dlResp.headers.get("Content-Type") || "application/octet-stream",
+      "Cache-Control": "no-store",
+      "Content-Disposition": `inline; filename="${path.split("/").pop()}"`
+    }
+  });
+}
+
+async function sign(data, secret) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey("raw", enc.encode(secret),
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sigBuf = await crypto.subtle.sign("HMAC", key, enc.encode(data));
+  return [...new Uint8Array(sigBuf)].map(b => b.toString(16).padStart(2, "0")).join("");
+}
