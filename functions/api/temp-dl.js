@@ -9,79 +9,120 @@ export async function onRequest(context) {
   const sig = url.searchParams.get("sig");
 
   if (!nonce || !exp || !sig) {
-    return new Response("missing params", { status: 400 });
+    return new Response("参数不完整", { status: 400 });
   }
 
-  // 1. 过期检查
   const now = Math.floor(Date.now() / 1000);
-  if (now > exp) {
-    return new Response("link expired", { status: 403 });
-  }
+  if (now > exp) return new Response("链接已过期", { status: 403 });
 
-  // 2. 签名校验（nonce:exp）
-  const data = `${nonce}:${exp}`;
-  const expectedSig = await sign(data, env.TEMP_LINK_SECRET);
-  if (sig !== expectedSig) {
-    return new Response("invalid signature", { status: 403 });
-  }
+  const expectedSig = await sign(`${nonce}:${exp}`, env.TEMP_LINK_SECRET);
+  if (sig !== expectedSig) return new Response("签名无效", { status: 403 });
 
-  // 3. 从 KV 取 path
   const db = getDatabase(env);
   const path = await db.get(`temp_path:${nonce}`);
-  if (!path) {
-    return new Response("link expired", { status: 403 });
-  }
+  if (!path) return new Response("链接不存在或已过期", { status: 403 });
 
-  // 4. nonce 一次性校验
   const usedKey = `temp_nonce:${nonce}`;
-  const alreadyUsed = await db.get(usedKey);
-  if (alreadyUsed) {
-    return new Response("link already used", { status: 403 });
-  }
+  if (await db.get(usedKey)) return new Response("链接已被使用", { status: 403 });
 
-  // 5. 读文件 metadata
   const row = await db.getWithMetadata(path);
   if (!row || row.value === null) {
-    return new Response(JSON.stringify({ error: "file not found", queriedPath: path }), { status: 404, headers: { "Content-Type": "application/json" } });
+    return new Response("文件不存在", { status: 404 });
   }
-  const meta = row.metadata;
+  const meta = row.metadata || {};
+  const channel = meta.Channel || "";
 
-  if (meta.Channel !== "TelegramNew") {
-    return new Response("only telegram files supported", { status: 400 });
+  let dlResp;
+  try {
+    if (channel === "TelegramNew") {
+      const proxy = meta.TgProxyUrl || "api.telegram.org";
+      const gf = await fetch(`https://${proxy}/bot${meta.TgBotToken}/getFile?file_id=${meta.TgFileId}`);
+      if (!gf.ok) return new Response("获取文件失败", { status: 502 });
+      const gj = await gf.json();
+      if (!gj.ok) return new Response("获取文件失败", { status: 502 });
+      dlResp = await fetch(`https://${proxy}/file/bot${meta.TgBotToken}/${gj.result.file_path}`, {
+        headers: { Range: request.headers.get("Range") || "" }
+      });
+
+    } else if (channel === "CloudflareR2" || channel === "R2" || channel === "cfr2") {
+      if (!env.R2_BUCKET) return new Response("存储未配置", { status: 500 });
+      const obj = await env.R2_BUCKET.get(path, {
+        range: request.headers.get("Range") ? parseRange(request.headers.get("Range")) : undefined
+      });
+      if (!obj) return new Response("文件不存在", { status: 404 });
+      dlResp = new Response(obj.body, {
+        status: 200,
+        headers: { "Content-Type": obj.httpMetadata?.contentType || "application/octet-stream", "Cache-Control": "no-store" }
+      });
+
+    } else if (channel === "HuggingFace" || channel === "huggingface") {
+      const token = meta.HfToken;
+      const repo = meta.HfRepo;
+      const hfPath = meta.HfPath || path;
+      const rev = meta.HfRevision || "main";
+      const proxy = meta.HfProxyUrl || "huggingface.co";
+      const hfUrl = `https://${proxy}/${repo.replace("/", "/resolve/")}/${encodeURIComponent(hfPath).replace("%2F", "/")}?revision=${rev}`;
+      dlResp = await fetch(hfUrl, {
+        headers: { Range: request.headers.get("Range") || "", ...(token ? { Authorization: `Bearer ${token}` } : {}) }
+      });
+      if (!dlResp.ok) return new Response("获取文件失败", { status: 502 });
+
+    } else if (channel === "Discord" || channel === "discord") {
+      const proxy = meta.DiscordProxyUrl || "discord.com";
+      let attachUrl = meta.AttachmentUrl;
+      if (!attachUrl) {
+        const mResp = await fetch(`https://${proxy}/api/v10/channels/${meta.DiscordChannelId}/messages/${meta.DiscordMessageId}`, {
+          headers: { Authorization: `Bot ${meta.DiscordToken}` }
+        });
+        if (!mResp.ok) return new Response("获取文件失败", { status: 502 });
+        const mJson = await mResp.json();
+        const att = (mJson.attachments || []).find(a => a.id === meta.DiscordAttachmentId) || mJson.attachments?.[0];
+        if (!att) return new Response("文件不存在", { status: 404 });
+        attachUrl = att.url;
+      }
+      dlResp = await fetch(attachUrl, { headers: { Range: request.headers.get("Range") || "" } });
+      if (!dlResp.ok) return new Response("获取文件失败", { status: 502 });
+
+    } else {
+      if (row.value) {
+        dlResp = new Response(row.value, { status: 200, headers: { "Content-Type": "application/octet-stream", "Cache-Control": "no-store" } });
+      } else {
+        return new Response("不支持的存储渠道", { status: 400 });
+      }
+    }
+  } catch (e) {
+    return new Response("服务异常", { status: 500 });
   }
 
-  // 6. getFile
-  const proxy = meta.TgProxyUrl || "api.telegram.org";
-  const gfResp = await fetch(`https://${proxy}/bot${meta.TgBotToken}/getFile?file_id=${meta.TgFileId}`);
-  if (!gfResp.ok) return new Response("getFile failed", { status: 502 });
-  const gfJson = await gfResp.json();
-  if (!gfJson.ok) return new Response("getFile error", { status: 502 });
-  const tgFilePath = gfJson.result.file_path;
+  if (!dlResp || !dlResp.ok) return new Response("下载失败", { status: 502 });
 
-  // 7. 拉文件
-  const dlResp = await fetch(`https://${proxy}/file/bot${meta.TgBotToken}/${tgFilePath}`, {
-    headers: { "Range": request.headers.get("Range") || "" }
-  });
-  if (!dlResp.ok) return new Response("download failed", { status: 502 });
+  await db.put(usedKey, "1", { expirationTtl: Math.max(exp - now, 1) });
 
-  // 8. 标记 nonce 已用
-  await db.put(usedKey, "1", { expirationTtl: exp - now });
-
-  // 9. 返回
   return new Response(dlResp.body, {
     status: dlResp.status,
     headers: {
       "Content-Type": dlResp.headers.get("Content-Type") || "application/octet-stream",
       "Cache-Control": "no-store",
-      "Content-Disposition": `attachment; filename="${path.split("/").pop()}"`
+      "Content-Disposition": `attachment; filename="${path.split("/").pop()}"`,
+      ...(dlResp.headers.get("Content-Range") ? { "Content-Range": dlResp.headers.get("Content-Range") } : {}),
+      ...(dlResp.headers.get("Accept-Ranges") ? { "Accept-Ranges": dlResp.headers.get("Accept-Ranges") } : {})
     }
   });
 }
 
+function parseRange(r) {
+  const m = r.match(/bytes=(\d*)-(\d*)/);
+  if (!m) return undefined;
+  const s = m[1] ? parseInt(m[1], 10) : undefined;
+  const e = m[2] ? parseInt(m[2], 10) : undefined;
+  if (s !== undefined && e !== undefined) return { offset: s, length: e - s + 1 };
+  if (s !== undefined) return { offset: s };
+  return undefined;
+}
+
 async function sign(data, secret) {
   const enc = new TextEncoder();
-  const key = await crypto.subtle.importKey("raw", enc.encode(secret),
-    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const sigBuf = await crypto.subtle.sign("HMAC", key, enc.encode(data));
-  return [...new Uint8Array(sigBuf)].map(b => b.toString(16).padStart(2, "0")).join("");
+  const key = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const buf = await crypto.subtle.sign("HMAC", key, enc.encode(data));
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
 }
