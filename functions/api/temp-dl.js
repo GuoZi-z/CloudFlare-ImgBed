@@ -4,25 +4,38 @@ export async function onRequest(context) {
   const { request, env } = context;
   const url = new URL(request.url);
 
-  const nonce = url.searchParams.get("nonce") || "";
-  const exp = parseInt(url.searchParams.get("exp") || "0", 10);
-  const sig = url.searchParams.get("sig");
+  const token = url.searchParams.get("token") || "";
+  if (!token) return new Response("参数不完整", { status: 400 });
 
-  if (!nonce || !exp || !sig) {
-    return new Response("参数不完整", { status: 400 });
+  // 解密 token，拿到 path + exp
+  let path, exp;
+  try {
+    const dec = atob(token);
+    const iv = dec.slice(0, 16);
+    const encrypted = dec.slice(16);
+
+    const key = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(env.TEMP_LINK_SECRET),
+      { name: "AES-CBC" },
+      false,
+      ["decrypt"]
+    );
+    const plain = await crypto.subtle.decrypt("AES-CBC", key, encrypted, { iv });
+    const decoded = new TextDecoder().decode(plain);
+
+    const parts = decoded.split("|");
+    path = parts[0];
+    exp = parseInt(parts[1]);
+  } catch (e) {
+    return new Response("链接无效", { status: 403 });
   }
 
+  // 检查过期
   const now = Math.floor(Date.now() / 1000);
- 
-  const expectedSig = await sign(`${nonce}:${exp}`, env.TEMP_LINK_SECRET);
-  if (sig !== expectedSig) return new Response("签名无效", { status: 403 });
+  if (now > exp) return new Response("链接已过期", { status: 403 });
 
   const db = getDatabase(env);
-  const path = await db.get(`temp_path:${nonce}`);
-  if (!path) return new Response("链接不存在或已过期", { status: 403 });
-
-  const usedKey = `temp_nonce:${nonce}`;
-  if (await db.get(usedKey)) return new Response("链接已被使用", { status: 403 });
 
   const row = await db.getWithMetadata(path);
   if (!row || row.value === null) {
