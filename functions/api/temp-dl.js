@@ -6,7 +6,7 @@ export async function onRequest(context) {
 
   // ---------- Token 解析 ----------
   let token = url.searchParams.get("token") || "";
-  token = token.replace(/ /g, '+'); // 修复 URL 中 '+' 被解析为空格
+  token = token.replace(/ /g, '+'); // 修复 '+' 被解析为空格
   if (!token) return errorResponse("参数不完整", 400);
 
   let path, exp;
@@ -37,7 +37,7 @@ export async function onRequest(context) {
     return errorResponse("链接已过期", 403);
   }
 
-  // 安全路径
+  // 安全清理路径
   path = sanitizePath(path);
   if (!path) return errorResponse("非法路径", 403);
 
@@ -128,7 +128,7 @@ function sanitizePath(path) {
   if (!path || typeof path !== "string") return null;
   // 移除 .. 和多余斜杠
   let cleaned = path.replace(/\.\./g, "").replace(/\/+/g, "/");
-  // 可限制前缀，根据需要开启
+  // 可选：限制前缀，根据需要开启
   // if (!cleaned.startsWith("gba/rom/")) return null;
   return cleaned || null;
 }
@@ -141,7 +141,6 @@ async function handleTelegram(meta, request) {
   const proxy = (meta.TgProxyUrl || "api.telegram.org").replace(/^https?:\/\//, "");
   const baseUrl = `https://${proxy}`;
 
-  // 获取 file_path
   const gf = await fetch(`${baseUrl}/bot${meta.TgBotToken}/getFile?file_id=${meta.TgFileId}`);
   if (!gf.ok) throw new Error(`Telegram getFile failed: ${gf.status}`);
   const gj = await gf.json();
@@ -182,45 +181,54 @@ async function handleR2(env, path, request) {
   return new Response(obj.body, { status: 200, headers });
 }
 
-// ---------- S3 兼容存储（如 MinIO、AWS S3） ----------
+// ---------- S3 兼容存储（示例，需配置元数据） ----------
 async function handleS3(meta, path, request) {
-  // 这里需要使用 AWS SDK 或直接构建签名 URL，示例用 fetch 简单处理
-  // 实际项目中可引入 @aws-sdk/client-s3
-  // 如果 meta 中有预签名 URL 可直接使用
-  const endpoint = meta.S3Endpoint || "https://s3.amazonaws.com";
-  const bucket = meta.S3Bucket;
-  const region = meta.S3Region || "us-east-1";
-  const accessKey = meta.S3AccessKey;
-  const secretKey = meta.S3SecretKey;
-  if (!bucket) throw new Error("Missing S3 bucket");
-  // 简单实现：使用预签名 URL（需要自行生成，或直接使用 meta.S3SignedUrl）
+  // 如果提供了预签名 URL，直接使用
   if (meta.S3SignedUrl) {
     const resp = await fetch(meta.S3SignedUrl, { headers: { Range: request.headers.get("Range") || "" } });
     if (!resp.ok) throw new Error(`S3 signed URL fetch failed: ${resp.status}`);
     return resp;
   }
-  throw new Error("S3 signed URL not provided");
+  // 否则需要自行实现 AWS SDK 签名，此处仅占位
+  throw new Error("S3 not fully implemented, provide SignedUrl");
 }
 
-// ---------- HuggingFace 渠道（修复 URL 构建） ----------
+// ---------- HuggingFace 渠道（修复） ----------
 async function handleHuggingFace(meta, path, request) {
+  // 优先使用直接提供的完整 URL
+  if (meta.HfFileUrl) {
+    const resp = await fetch(meta.HfFileUrl, {
+      headers: {
+        "Range": request.headers.get("Range") || "",
+        ...(meta.HfToken ? { "Authorization": `Bearer ${meta.HfToken}` } : {}),
+      },
+    });
+    if (!resp.ok) throw new Error(`HuggingFace (direct URL) failed: ${resp.status}`);
+    return resp;
+  }
+
   if (!meta.HfRepo) throw new Error("Missing HuggingFace repo");
   const token = meta.HfToken;
-  const repo = meta.HfRepo;          // "username/repo"
-  const hfPath = meta.HfPath || path;
+  let repo = meta.HfRepo.replace(/^\/+|\/+$/g, '');
+  let hfPath = (meta.HfPath || path).replace(/^\/+|\/+$/g, '');
   const rev = meta.HfRevision || "main";
   const proxy = (meta.HfProxyUrl || "huggingface.co").replace(/^https?:\/\//, "");
 
-  // 分段编码路径，保留斜杠
+  // 分段编码，保留斜杠
   const encodedPath = hfPath.split("/").map(encodeURIComponent).join("/");
+  // 通用格式，如需 datasets 可改为 /datasets/${repo}/resolve/${rev}/${encodedPath}
   const hfUrl = `https://${proxy}/${repo}/resolve/${rev}/${encodedPath}`;
+  console.log("HuggingFace URL:", hfUrl); // 调试日志
 
   const headers = {
     "Range": request.headers.get("Range") || "",
     ...(token ? { "Authorization": `Bearer ${token}` } : {}),
   };
   const resp = await fetch(hfUrl, { headers });
-  if (!resp.ok) throw new Error(`HuggingFace fetch failed: ${resp.status}`);
+  if (!resp.ok) {
+    const errText = await resp.text();
+    throw new Error(`HuggingFace fetch failed: ${resp.status} - ${errText}`);
+  }
   return resp;
 }
 
@@ -257,7 +265,6 @@ async function handleDiscord(meta, request) {
 // ---------- External（302 重定向） ----------
 async function handleExternal(meta) {
   if (!meta.ExternalUrl) throw new Error("Missing ExternalUrl");
-  // 直接返回 302 响应，浏览器会跳转
   return new Response(null, {
     status: 302,
     headers: { Location: meta.ExternalUrl },
