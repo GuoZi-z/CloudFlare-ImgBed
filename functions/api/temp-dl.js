@@ -1,4 +1,4 @@
-import { getDatabase } from "../../utils/databaseAdapter.js";
+import { getDatabase } from "../utils/databaseAdapter.js";
 
 export async function onRequest(context) {
   const { request, env } = context;
